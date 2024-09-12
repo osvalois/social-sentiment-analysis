@@ -1,0 +1,84 @@
+name: Continuous Deployment
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-west-2
+    
+    - name: Use Node.js
+      uses: actions/setup-node@v2
+      with:
+        node-version: '16.x'
+    
+    - name: Install Dependencies
+      run: |
+        npm ci
+        cd frontend && npm ci
+        cd ../backend && npm ci
+    
+    - name: Build Frontend
+      run: |
+        cd frontend
+        npm run build
+    
+    - name: Deploy Frontend to S3
+      run: |
+        aws s3 sync frontend/build/ s3://${{ secrets.AWS_S3_BUCKET }} --delete
+    
+    - name: Invalidate CloudFront Cache
+      run: |
+        aws cloudfront create-invalidation --distribution-id ${{ secrets.AWS_CLOUDFRONT_DISTRIBUTION_ID }} --paths "/*"
+    
+    - name: Deploy Backend
+      run: |
+        cd backend
+        npm run deploy
+    
+    - name: Update Lambda Functions
+      run: |
+        aws lambda update-function-code --function-name ${{ secrets.AWS_LAMBDA_TWEET_COLLECTOR }} --zip-file fileb://backend/dist/tweet-collector.zip
+        aws lambda update-function-code --function-name ${{ secrets.AWS_LAMBDA_SENTIMENT_ANALYZER }} --zip-file fileb://backend/dist/sentiment-analyzer.zip
+    
+    - name: Run Database Migrations
+      run: |
+        cd backend
+        npm run migrate
+    
+    - name: Update API Gateway
+      run: |
+        aws apigateway create-deployment --rest-api-id ${{ secrets.AWS_API_GATEWAY_ID }} --stage-name prod
+    
+    - name: Notify Slack on Success
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        text: Deployment to production completed successfully!
+        fields: repo,message,commit,author,action,eventName,ref,workflow
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+      if: success()
+    
+    - name: Notify Slack on Failure
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        text: Deployment to production failed!
+        fields: repo,message,commit,author,action,eventName,ref,workflow
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+      if: failure()
